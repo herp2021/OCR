@@ -1,6 +1,7 @@
 
 import os
 import sys
+import shutil
 import threading
 import queue
 from pathlib import Path
@@ -26,6 +27,34 @@ LANGUAGES = {
     "English + Bengali + Hindi": "eng+ben+hin",
 }
 
+COMMON_TESSERACT_PATHS = [
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"),
+]
+
+def find_tesseract():
+    p = shutil.which("tesseract")
+    if p:
+        return p
+    for p in COMMON_TESSERACT_PATHS:
+        if Path(p).exists():
+            return p
+    try:
+        import winreg
+        for root, keyname in [
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Tesseract-OCR"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Tesseract-OCR"),
+            (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Tesseract-OCR")]:
+            try:
+                with winreg.OpenKey(root, keyname) as k:
+                    d,_=winreg.QueryValueEx(k,"InstallDir")
+                    p=Path(d)/"tesseract.exe"
+                    if p.exists(): return str(p)
+            except Exception: pass
+    except Exception: pass
+    return None
+
 class OCRApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -38,9 +67,11 @@ class OCRApp(tk.Tk):
         self.output_var = tk.StringVar()
         self.lang_var = tk.StringVar(value="English + Bengali + Hindi")
         self.accuracy_var = tk.BooleanVar(value=True)
+        self.tess_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Ready")
         self.progress_var = tk.DoubleVar(value=0)
         self._build_ui()
+        self._auto_detect_tesseract()
         self.after(100, self._poll_queue)
 
     def _build_ui(self):
@@ -76,6 +107,13 @@ class OCRApp(tk.Tk):
                      state="readonly", width=34).grid(row=0, column=1, sticky="w", padx=10)
         ttk.Checkbutton(options, text="Improve Accuracy (slower)", variable=self.accuracy_var).grid(row=1, column=1, sticky="w", pady=(10,0))
 
+        ttk.Label(options, text="Tesseract:").grid(row=2, column=0, sticky="w", pady=(10,0))
+        ttk.Entry(options, textvariable=self.tess_var).grid(row=2, column=1, sticky="ew", padx=10, pady=(10,0))
+        ttk.Button(options, text="Browse / Detect", command=self.choose_tesseract).grid(row=2, column=2, padx=5, pady=(10,0))
+        self.tess_status = ttk.Label(options, text="Checking Tesseract...")
+        self.tess_status.grid(row=3, column=1, columnspan=2, sticky="w", padx=10, pady=5)
+        options.columnconfigure(1, weight=1)
+
         buttons = ttk.Frame(main)
         buttons.grid(row=5, column=0, columnspan=2, sticky="ew")
         self.start_btn = tk.Button(buttons, text="🚀  START OCR", command=self.start,
@@ -102,6 +140,32 @@ class OCRApp(tk.Tk):
         main.columnconfigure(0, weight=1)
         main.rowconfigure(8, weight=1)
 
+    def _auto_detect_tesseract(self):
+        path = find_tesseract()
+        if path:
+            self.tess_var.set(path)
+            pytesseract.pytesseract.tesseract_cmd = path
+            try:
+                v = str(pytesseract.get_tesseract_version()).splitlines()[0]
+                self.tess_status.config(text=f"✓ Tesseract detected: {path} | {v}", foreground="green")
+                self.log_msg(f"[INFO] Tesseract detected automatically: {path}")
+            except Exception as e:
+                self.tess_status.config(text=f"⚠ Tesseract found but cannot run: {e}", foreground="#b36b00")
+        else:
+            self.tess_status.config(text="✗ Not detected. Click Browse / Detect and select tesseract.exe.", foreground="red")
+
+    def choose_tesseract(self):
+        p = filedialog.askopenfilename(title="Select tesseract.exe", filetypes=[("Tesseract executable", "tesseract.exe"), ("All files", "*.*")])
+        if p:
+            self.tess_var.set(p)
+            pytesseract.pytesseract.tesseract_cmd = p
+            try:
+                v = str(pytesseract.get_tesseract_version()).splitlines()[0]
+                self.tess_status.config(text=f"✓ Tesseract ready: {p} | {v}", foreground="green")
+            except Exception as e:
+                self.tess_status.config(text=f"✗ Cannot run selected Tesseract: {e}", foreground="red")
+                messagebox.showerror("Tesseract", str(e))
+
     def choose_input(self):
         p = filedialog.askdirectory(title="Select folder containing images")
         if p:
@@ -124,15 +188,15 @@ class OCRApp(tk.Tk):
             messagebox.showerror("Invalid folder", "Please select a valid image folder.")
             return
 
-        # Tesseract check
+        tess = self.tess_var.get().strip()
+        if not tess or not Path(tess).exists():
+            messagebox.showerror("Tesseract not found", "Tesseract is installed, but this app cannot find tesseract.exe.\n\nClick Browse / Detect and select:\nC:\\Program Files\\Tesseract-OCR\\tesseract.exe")
+            return
+        pytesseract.pytesseract.tesseract_cmd = tess
         try:
             pytesseract.get_tesseract_version()
-        except Exception:
-            messagebox.showerror(
-                "Tesseract not found",
-                "Tesseract OCR is not installed or is not in PATH.\n\n"
-                "Install Tesseract for Windows, then restart this app."
-            )
+        except Exception as e:
+            messagebox.showerror("Tesseract error", f"Cannot run Tesseract:\n{e}")
             return
 
         images = sorted([p for p in inp.iterdir() if p.suffix.lower() in SUPPORTED])
@@ -180,6 +244,14 @@ class OCRApp(tk.Tk):
 
         self.log_msg(f"[INFO] Found {total} image(s).")
         self.log_msg(f"[INFO] OCR language: {self.lang_var.get()}")
+        try:
+            installed = pytesseract.get_languages(config="")
+            missing = [x for x in lang.split("+") if x not in installed]
+            if missing:
+                self.msg_queue.put(("error", "Missing Tesseract language data: " + ", ".join(missing) + "\n\nInstall the Bengali/Hindi language packs in Tesseract and try again."))
+                return
+        except Exception:
+            pass
 
         for i, path in enumerate(images, 1):
             if self.stop_event.is_set():
